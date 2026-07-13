@@ -243,6 +243,7 @@ footer{margin-top:46px;text-align:center;font-size:12px;color:#A79FC0}
     <button class="nav-btn adminOnly" data-view="cli" onclick="go('cli')"><svg fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><circle cx="9" cy="8" r="3.5"/><circle cx="17" cy="9" r="2.6"/><path d="M2.5 20c0-3.5 3-5.5 6.5-5.5s6.5 2 6.5 5.5M16 15.2c2.9.3 5.5 2 5.5 4.8"/></svg><span>Clientes</span></button>
     <button class="nav-btn adminOnly" data-view="cfg" onclick="go('cfg')"><svg fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M19 12a7 7 0 0 0-.15-1.4l2.1-1.6-2-3.4-2.4 1a7 7 0 0 0-2.4-1.4L13.7 2h-3.4l-.45 2.6a7 7 0 0 0-2.4 1.4l-2.4-1-2 3.4 2.1 1.6A7 7 0 0 0 5 12c0 .5.05.95.15 1.4l-2.1 1.6 2 3.4 2.4-1a7 7 0 0 0 2.4 1.4l.45 2.6h3.4l.45-2.6a7 7 0 0 0 2.4-1.4l2.4 1 2-3.4-2.1-1.6c.1-.45.15-.9.15-1.4Z"/></svg><span>Configurações</span></button>
     <div class="spacer"></div>
+    <div id="syncBadge" style="font-size:11px;color:rgba(255,255,255,.45);padding:6px 13px">☁️ Conectando…</div>
     <button class="nav-btn foot-btn" onclick="logout()"><svg fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4M16 17l5-5-5-5M21 12H9"/></svg><span>Sair</span></button>
   </aside>
 
@@ -290,6 +291,7 @@ const DOW    = ['Dom','Seg','Ter','Qua','Qui','Sex','Sáb'];
 const HOJE   = new Date();
 const uid    = () => Math.random().toString(36).slice(2,10);
 const esc    = s => String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const nl     = s => esc(s).replace(/\n/g,'<br>'); // texto com quebras de linha preservadas
 const monthKey = d => `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}`;
 const labelMK  = mk => { const [y,m]=mk.split('-'); return MESES3[+m-1]+'/'+y.slice(2); };
 
@@ -301,15 +303,64 @@ const TIPOS = {
   live:     {label:'Live',      color:'#F59E0B'}
 };
 const STATUS = {
-  planejado:{label:'Planejado', color:'#94A3B8'},
-  aprovado: {label:'Aprovado',  color:'#8B5CF6'},
-  postado:  {label:'Postado',   color:'#10B981'}
+  planejado:{label:'Planejado',       color:'#94A3B8'},
+  aprovacao:{label:'Em aprovação',    color:'#F59E0B'},
+  ajuste:   {label:'Ajuste solicitado',color:'#EF4444'},
+  aprovado: {label:'Aprovado',        color:'#8B5CF6'},
+  postado:  {label:'Postado',         color:'#10B981'}
 };
+
+/* ---------- Supabase (banco na nuvem) ---------- */
+const SB_URL = 'https://gzemjugxojqnfrtgmanv.supabase.co';
+const SB_KEY = 'sb_publishable_tPASvE65qUCBaefv2wWzZw_xkzMbsbl'; // chave pública (feita para ficar no código)
+const SB_HEADERS = { apikey: SB_KEY, Authorization: 'Bearer '+SB_KEY, 'Content-Type': 'application/json' };
+let cloudReachable = false, lastRemoteStamp = null, saveTimer = null;
+
+async function sbGet(){
+  const r = await fetch(SB_URL+'/rest/v1/hub_data?key=eq.main&select=value,updated_at', {headers: SB_HEADERS});
+  if(!r.ok) throw new Error('supabase get '+r.status);
+  const rows = await r.json();
+  return rows[0] || null;
+}
+async function sbPut(){
+  const stamp = new Date().toISOString();
+  const r = await fetch(SB_URL+'/rest/v1/hub_data', {
+    method:'POST',
+    headers: {...SB_HEADERS, Prefer:'resolution=merge-duplicates'},
+    body: JSON.stringify([{key:'main', value: DB, updated_at: stamp}])
+  });
+  if(!r.ok) throw new Error('supabase put '+r.status);
+  lastRemoteStamp = stamp;
+}
+function setSync(st){
+  const el = document.getElementById('syncBadge'); if(!el) return;
+  el.innerHTML = st==='ok' ? '☁️ Sincronizado' : st==='saving' ? '↻ Salvando…' : '⚠️ Offline — salvo neste navegador';
+  el.style.color = st==='off' ? '#FCD34D' : 'rgba(255,255,255,.45)';
+}
+// Busca atualizações feitas em outros dispositivos (a cada 30s e ao voltar à aba)
+async function pollRemote(){
+  if(!session.role) return;                                   // ninguém logado
+  if(document.getElementById('modalBg').classList.contains('on')) return; // não interrompe edição
+  try{
+    const cloud = await sbGet();
+    cloudReachable = true;
+    if(cloud && cloud.updated_at !== lastRemoteStamp){
+      lastRemoteStamp = cloud.updated_at;
+      DB = cloud.value;
+      try{ localStorage.setItem('sevilahub:v1', JSON.stringify(DB)); }catch(e){}
+      if(!DB.clients[session.clientId]) session.clientId = Object.keys(DB.clients)[0];
+      refreshSidebar(); go(currentView);
+    }
+    setSync('ok');
+  }catch(e){ cloudReachable=false; setSync('off'); }
+}
+setInterval(pollRemote, 30000);
+window.addEventListener('focus', pollRemote);
 
 /* ---------- Banco de dados (com fallback) ---------- */
 // EMBEDDED_DB: preenchido automaticamente pelo botão "Exportar versão para publicar".
 // É assim que os clientes veem seus dados ao abrir o link público.
-const EMBEDDED_DB = /*__EMBED_START__*/null/*__EMBED_END__*/;
+const EMBEDDED_DB = /*__EMBED_START__*/{"settings": {"adminPass": "aurora123", "whats": ""}, "clients": {"demo1": {"id": "demo1", "name": "Café Aurora", "handle": "@cafeaurora", "code": "cafe2026", "posts": [{"id": "6zsa54zf", "date": "2026-07-01", "title": "Bastidores da torra da semana", "type": "reels", "platform": "Instagram", "status": "postado", "caption": "", "objetivo": "Alcance — atrair novas contas", "explicacao": "", "media": "", "mediaName": "", "mediaLink": "", "feedback": ""}, {"id": "51w3ihfu", "date": "2026-07-02", "title": "Story: enquete — qual seu café da manhã?", "type": "story", "platform": "Instagram", "status": "postado", "caption": "", "objetivo": "Engajamento — ativar quem já segue", "explicacao": "", "media": "", "mediaName": "", "mediaLink": "", "feedback": ""}, {"id": "tg5oql9f", "date": "2026-07-03", "title": "Carrossel: 5 mitos sobre café especial", "type": "carrossel", "platform": "Instagram", "status": "postado", "caption": "", "objetivo": "Autoridade — educar a audiência", "explicacao": "Carrossel educativo quebrando mitos comuns. A ideia é posicionar a marca como referência em café especial e gerar salvamentos — formato que o algoritmo prioriza.", "media": "", "mediaName": "", "mediaLink": "", "feedback": ""}, {"id": "pa6q1duh", "date": "2026-07-06", "title": "Foto do prato novo + legenda storytelling", "type": "estatico", "platform": "Instagram", "status": "postado", "caption": "", "objetivo": "Conversão — levar ao cardápio/loja", "explicacao": "", "media": "", "mediaName": "", "mediaLink": "", "feedback": ""}, {"id": "tavk4j81", "date": "2026-07-08", "title": "Reels: latte art em 30 segundos", "type": "reels", "platform": "Instagram", "status": "postado", "caption": "", "objetivo": "Alcance — atrair novas contas", "explicacao": "", "media": "", "mediaName": "", "mediaLink": "", "feedback": ""}, {"id": "9xzip2pj", "date": "2026-07-09", "title": "Story: repost de clientes", "type": "story", "platform": "Instagram", "status": "postado", "caption": "", "objetivo": "Engajamento — ativar quem já segue", "explicacao": "", "media": "", "mediaName": "", "mediaLink": "", "feedback": ""}, {"id": "idonw041", "date": "2026-07-10", "title": "Carrossel: como harmonizar café e doces", "type": "carrossel", "platform": "Instagram", "status": "postado", "caption": "", "objetivo": "Autoridade — educar a audiência", "explicacao": "", "media": "", "mediaName": "", "mediaLink": "", "feedback": ""}, {"id": "0evi6s1t", "date": "2026-07-13", "title": "Reels tendência: um dia na cafeteria", "type": "reels", "platform": "Instagram", "status": "aprovado", "caption": "", "objetivo": "Alcance — atrair novas contas", "explicacao": "", "media": "", "mediaName": "", "mediaLink": "", "feedback": ""}, {"id": "vfpibl6u", "date": "2026-07-15", "title": "Estático: promoção de inverno", "type": "estatico", "platform": "Instagram", "status": "aprovado", "caption": "", "objetivo": "Conversão — levar ao cardápio/loja", "explicacao": "", "media": "", "mediaName": "", "mediaLink": "", "feedback": ""}, {"id": "tmb4v1oq", "date": "2026-07-16", "title": "Story: contagem regressiva do evento", "type": "story", "platform": "Instagram", "status": "aprovado", "caption": "", "objetivo": "Engajamento — ativar quem já segue", "explicacao": "", "media": "", "mediaName": "", "mediaLink": "", "feedback": ""}, {"id": "2g2rm8yt", "date": "2026-07-17", "title": "Live: degustação guiada com o barista", "type": "live", "platform": "Instagram", "status": "aprovado", "caption": "", "objetivo": "Relacionamento — aproximar a comunidade", "explicacao": "", "media": "", "mediaName": "", "mediaLink": "", "feedback": ""}, {"id": "yc18fjp2", "date": "2026-07-20", "title": "Carrossel: origem dos nossos grãos", "type": "carrossel", "platform": "Instagram", "status": "planejado", "caption": "", "objetivo": "Autoridade — educar a audiência", "explicacao": "", "media": "", "mediaName": "", "mediaLink": "", "feedback": ""}, {"id": "wkmxw5yu", "date": "2026-07-22", "title": "Reels: receita de cold brew em casa", "type": "reels", "platform": "Instagram", "status": "planejado", "caption": "", "objetivo": "Alcance — atrair novas contas", "explicacao": "", "media": "", "mediaName": "", "mediaLink": "", "feedback": ""}, {"id": "aeq6x410", "date": "2026-07-24", "title": "Estático: depoimento de cliente", "type": "estatico", "platform": "Instagram", "status": "planejado", "caption": "", "objetivo": "Conversão — levar ao cardápio/loja", "explicacao": "", "media": "", "mediaName": "", "mediaLink": "", "feedback": ""}, {"id": "io1k0v50", "date": "2026-07-27", "title": "Carrossel: bastidores da equipe", "type": "carrossel", "platform": "Instagram", "status": "planejado", "caption": "", "objetivo": "Autoridade — educar a audiência", "explicacao": "", "media": "", "mediaName": "", "mediaLink": "", "feedback": ""}, {"id": "3dcsf14m", "date": "2026-07-29", "title": "Reels: novidade do cardápio (teaser)", "type": "reels", "platform": "Instagram", "status": "planejado", "caption": "", "objetivo": "Alcance — atrair novas contas", "explicacao": "", "media": "", "mediaName": "", "mediaLink": "", "feedback": ""}, {"id": "pn6ih3f4", "date": "2026-07-31", "title": "Story: recap do mês + agradecimento", "type": "story", "platform": "Instagram", "status": "planejado", "caption": "", "objetivo": "Engajamento — ativar quem já segue", "explicacao": "", "media": "", "mediaName": "", "mediaLink": "", "feedback": ""}], "reports": {"2025-12": {"seguidores": 8420, "alcance": 38200, "impressoes": 72580, "engajamento": 3.1, "publicacoes": 14, "notas": ""}, "2026-01": {"seguidores": 8790, "alcance": 41600, "impressoes": 79040, "engajamento": 3.3, "publicacoes": 17, "notas": ""}, "2026-02": {"seguidores": 9260, "alcance": 39800, "impressoes": 75620, "engajamento": 3.2, "publicacoes": 15, "notas": ""}, "2026-03": {"seguidores": 9840, "alcance": 47300, "impressoes": 89870, "engajamento": 3.8, "publicacoes": 18, "notas": ""}, "2026-04": {"seguidores": 10480, "alcance": 52900, "impressoes": 100510, "engajamento": 4.1, "publicacoes": 16, "notas": ""}, "2026-05": {"seguidores": 11150, "alcance": 58400, "impressoes": 110960, "engajamento": 4.4, "publicacoes": 14, "notas": ""}, "2026-06": {"seguidores": 11920, "alcance": 61200, "impressoes": 116280, "engajamento": 4.6, "publicacoes": 17, "notas": ""}, "2026-07": {"seguidores": 12540, "alcance": 64800, "impressoes": 123120, "engajamento": 4.8, "publicacoes": 15, "notas": "Mês parcial — dados até 13/07. Reels seguem como principal motor de alcance."}}, "analysis": [{"id": "kia35lfh", "area": "Bio & posicionamento", "score": 8, "prio": "baixa", "txt": "Bio clara e com CTA. Sugestão: incluir palavra-chave \"café especial em Maringá\" para busca local.", "fotos": []}, {"id": "tw4fkw63", "area": "Identidade visual do feed", "score": 7, "prio": "media", "txt": "Paleta consistente, mas capas de Reels sem padrão. Criar template fixo de capa aumenta reconhecimento.", "fotos": []}, {"id": "hm140e9s", "area": "Frequência de postagem", "score": 6, "prio": "alta", "txt": "Média de 3,5 posts/semana com lacunas nos fins de semana — justamente o pico de movimento. Redistribuir 2 posts para sáb/dom.", "fotos": []}, {"id": "pc5sw3lv", "area": "Uso de Reels", "score": 9, "prio": "baixa", "txt": "Reels representam 62% do alcance total. Manter cadência de 2–3 por semana.", "fotos": []}, {"id": "z3mq1fwf", "area": "Interação nos Stories", "score": 5, "prio": "alta", "txt": "Poucas figurinhas interativas (enquete, quiz, caixa de perguntas). Meta: 1 elemento interativo por dia útil.", "fotos": []}, {"id": "o1p0xsod", "area": "Destaques do perfil", "score": 6, "prio": "media", "txt": "Capas desatualizadas e sem destaque de \"Cardápio\". Reorganizar em: Cardápio · Local · Clientes · Bastidores.", "fotos": []}]}, "mbgv8k26": {"id": "mbgv8k26", "name": "Projeto VEMCER", "handle": "projetovemcer", "code": "vemcer123", "posts": [], "reports": {}, "analysis": [{"id": "eocly4bl", "area": "Biografia", "score": 9, "prio": "alta", "txt": "A bio está boa, mas ainda temos umas pequenas alterações que podemos fazer para melhorar ainda mais o impacto.\n\n🏆 Transformamos vidas através do esporte e inclusão. (Deixar no plural passa mais autoridade, mostra que tem várias pessoas no projetp)\n📊 Desde 2017 · +20 mil vidas impactadas (algumas pessoas podem não saber. que significa 20k)\n🤟🏽 Escolha #INCLUIR e faca parte da mudança!\n💚 Doe: pix@projetovemcer.com.br", "fotos": []}, {"id": "6fnyfc6s", "area": "Foto de perfil", "score": 10, "prio": "baixa", "txt": "Está ótima", "fotos": []}, {"id": "5jaaktqo", "area": "Link na bio", "score": 4, "prio": "alta", "txt": "- SUGESTÃO - \n\nColocar um link na bio direcionando para o whatsapp de atendimento de vocês, assim caso alguém tenha alguma dúvida, pode falar com vocês, manter um ponto de contato é importante.", "fotos": []}, {"id": "j281ruhn", "area": "Destaques", "score": 8, "prio": "alta", "txt": "Os destaques estão bons, a minha sugestão seria alterar as capas, usando a ideia que vocês estavam tendo de colocar um desenho que represente cada luta, mas sem colocar a logo de vocês em baixo, não tem necessidade de incluir a logo pois é um projeto no seu próprio perfil.", "fotos": []}, {"id": "wld2fz4s", "area": "Posts fixado", "score": 5, "prio": "alta", "txt": "Os posts fixados são a primeira fonte de contato que o cliente tem assim que chega na sua página, precisamos deixar 3 posts para atualizar.\n\nPost 1 - Pensei em criar um carrossel explicando \"por dentro do projeto VemCer\", nele vamos falar sobre o projeto, porque foi criado e mostrar as aulas que são dadas no projeto.\n\nPost 2 - Horários atualizados 2026 (o post de horários é legal de manter, porém é importante deixa atualizado)\n\nPost 3 - Podemos manter o reels que está fixado, ele está legal.", "fotos": []}]}}}/*__EMBED_END__*/;
 let DB = null, storageOk = true;
 
 function seed(){
@@ -335,7 +386,7 @@ function seed(){
     posts.push({id:uid(), date:`${y}-${String(m+1).padStart(2,'0')}-${String(d).padStart(2,'0')}`,
       title:t, type:tp, platform:'Instagram',
       status: d < HOJE.getDate() ? 'postado' : (d <= HOJE.getDate()+5 ? 'aprovado' : 'planejado'),
-      caption:'', objetivo:OBJ[tp],
+      caption:'', objetivo:OBJ[tp], media:'', mediaName:'', mediaLink:'', feedback:'',
       explicacao: d===3 ? 'Carrossel educativo quebrando mitos comuns. A ideia é posicionar a marca como referência em café especial e gerar salvamentos — formato que o algoritmo prioriza.' : ''});
   });
   // Relatórios: 8 meses de histórico até o mês atual
@@ -349,6 +400,10 @@ function seed(){
       engajamento:engBase[idx], publicacoes:14+((idx*3)%5),
       notas: idx===7 ? 'Mês parcial — dados até '+HOJE.getDate()+'/'+String(m+1).padStart(2,'0')+'. Reels seguem como principal motor de alcance.' : ''};
   }
+  // Deixa um conteúdo aguardando aprovação para demonstrar o fluxo
+  const emAprov = posts.find(p=>p.title.includes('promoção de inverno'));
+  if(emAprov){ emAprov.status='aprovacao'; emAprov.mediaLink='https://drive.google.com';
+    emAprov.explicacao='Arte da promoção de inverno com o novo combo. Confira a prévia e aprove ou peça ajustes por aqui mesmo.'; }
   const analysis=[
     {id:uid(),area:'Bio & posicionamento',score:8,prio:'baixa',txt:'Bio clara e com CTA. Sugestão: incluir palavra-chave "café especial em Maringá" para busca local.'},
     {id:uid(),area:'Identidade visual do feed',score:7,prio:'media',txt:'Paleta consistente, mas capas de Reels sem padrão. Criar template fixo de capa aumenta reconhecimento.'},
@@ -358,33 +413,39 @@ function seed(){
     {id:uid(),area:'Destaques do perfil',score:6,prio:'media',txt:'Capas desatualizadas e sem destaque de "Cardápio". Reorganizar em: Cardápio · Local · Clientes · Bastidores.'}
   ];
   return {
-    settings:{adminPass:'aurora123'},
+    settings:{adminPass:'aurora123', whats:''},
     clients:{[cid]:{id:cid,name:'Café Aurora',handle:'@cafeaurora',code:'cafe2026',posts,reports,analysis}}
   };
 }
 
 async function loadDB(){
-  // 1º: armazenamento do artifact (quando aberto dentro do Claude)
-  try{
-    if(window.storage){
-      const r = await window.storage.get('sevilahub:v1');
-      if(r && r.value) DB = JSON.parse(r.value);
-    }
-  }catch(e){ /* chave não existe ainda */ }
-  // 2º: localStorage do navegador (quando hospedado, ex.: GitHub Pages)
+  // 1º: banco na nuvem (fonte oficial dos dados)
+  let cloud = null;
+  try{ cloud = await sbGet(); cloudReachable = true; }
+  catch(e){ cloudReachable = false; console.warn('Sem conexão com o banco — modo offline.', e); }
+  if(cloud){ DB = cloud.value; lastRemoteStamp = cloud.updated_at; }
+  // 2º: cache local deste navegador
   if(!DB){ try{ const ls = localStorage.getItem('sevilahub:v1'); if(ls) DB = JSON.parse(ls); }catch(e){} }
-  // 3º: dados embutidos na publicação (o que o cliente vê ao abrir o link)
+  // 3º: dados embutidos na publicação
   if(!DB && EMBEDDED_DB){ DB = JSON.parse(JSON.stringify(EMBEDDED_DB)); }
   // 4º: demonstração
   if(!DB){ DB = seed(); }
-  saveDB();
+  // Primeira vez com banco vazio: migra os dados existentes para a nuvem
+  if(cloudReachable && !cloud){
+    try{ await sbPut(); }catch(e){ cloudReachable=false; }
+  }
+  try{ localStorage.setItem('sevilahub:v1', JSON.stringify(DB)); }catch(e){}
+  storageOk = true;
 }
 async function saveDB(){
-  let ok = false;
-  try{ if(window.storage){ await window.storage.set('sevilahub:v1', JSON.stringify(DB)); ok = true; } }catch(e){}
-  try{ localStorage.setItem('sevilahub:v1', JSON.stringify(DB)); ok = true; }catch(e){}
-  storageOk = ok;
-  if(!ok) console.warn('Persistência indisponível — dados apenas em memória.');
+  try{ localStorage.setItem('sevilahub:v1', JSON.stringify(DB)); }catch(e){}
+  try{ if(window.storage) await window.storage.set('sevilahub:v1', JSON.stringify(DB)); }catch(e){}
+  setSync('saving');
+  clearTimeout(saveTimer);
+  saveTimer = setTimeout(async ()=>{
+    try{ await sbPut(); cloudReachable = true; setSync('ok'); }
+    catch(e){ cloudReachable = false; setSync('off'); }
+  }, 700); // agrupa salvamentos em sequência numa única gravação
 }
 
 /* ---------- Sessão ---------- */
@@ -598,7 +659,7 @@ function renderCal(){
     const dayPosts=posts.filter(p=>p.date===dk);
     cells+=`<div class="cal-cell ${isToday?'today':''}"><span class="d">${d}</span>
       ${dayPosts.map(p=>`<div class="pill" style="background:${TIPOS[p.type].color}" onclick="openPost('${p.id}')" title="${esc(p.title)}">
-        <i class="st" style="background:${STATUS[p.status].color}"></i><span>${esc(p.title.length>26?p.title.slice(0,25)+'…':p.title)}</span></div>`).join('')}
+        <i class="st" style="background:${STATUS[p.status].color}"></i><span>${esc(p.title.length>24?p.title.slice(0,23)+'…':p.title)}${(p.comments&&p.comments.length)?' 💬':''}</span></div>`).join('')}
       ${isAdmin()?`<div class="pill" style="background:#EFEAFB;color:#7C3AED;justify-content:center" onclick="openPost(null,'${dk}')">+ novo</div>`:''}
     </div>`;
   }
@@ -624,10 +685,62 @@ function renderCal(){
 }
 function navCal(dir){ calCursor=new Date(calCursor.getFullYear(),calCursor.getMonth()+dir,1); renderCal(); }
 
+/* Comentários nos conteúdos: salvos localmente + notificação via WhatsApp */
+function cmtThreadHTML(p){
+  const list = (p.comments||[]);
+  return `<div class="field"><label>💬 Comentários</label>
+    <div style="display:flex;flex-direction:column;gap:8px;margin-bottom:10px;max-height:220px;overflow:auto">
+      ${list.length ? list.map(c=>`
+        <div style="align-self:${c.author==='agencia'?'flex-end':'flex-start'};max-width:85%;
+          background:${c.author==='agencia'?'linear-gradient(135deg,#7C3AED,#A855F7)':'#F3EFFB'};
+          color:${c.author==='agencia'?'#fff':'#4B4368'};
+          padding:9px 12px;border-radius:12px;font-size:13px;line-height:1.55">
+          ${nl(c.text)}
+          <div style="font-size:10.5px;opacity:.65;margin-top:4px">${c.author==='agencia'?'Sevila Studio':'Cliente'} · ${new Date(c.ts).toLocaleDateString('pt-BR')}</div>
+        </div>`).join('')
+      : '<p class="sub" style="font-size:12.5px">Nenhum comentário ainda.</p>'}
+    </div>
+    <textarea id="cmtTxt" style="min-height:64px" placeholder="Escreva um comentário sobre este conteúdo…"></textarea>
+    <button class="btn ghost sm" style="margin-top:8px" onclick="addComment('${p.id}')">Enviar comentário</button></div>`;
+}
+function addComment(id){
+  const p = client().posts.find(x=>x.id===id);
+  const txt = ($('#cmtTxt')?$('#cmtTxt').value:'').trim();
+  if(!txt) return alert('Escreva o comentário antes de enviar.');
+  if(!p.comments) p.comments = [];
+  p.comments.push({author: isAdmin()?'agencia':'cliente', text: txt, ts: Date.now()});
+  saveDB();
+  // Cliente comentou -> notifica a agência via WhatsApp
+  if(!isAdmin()){
+    const dataBR = new Date(p.date+'T12:00').toLocaleDateString('pt-BR');
+    const texto = `*${client().name}* — comentário no conteúdo "${p.title}" (${dataBR}):\n💬 ${txt}`;
+    const w = (DB.settings.whats||'').replace(/\D/g,'');
+    if(w){ window.open('https://wa.me/'+w+'?text='+encodeURIComponent(texto),'_blank'); }
+    else if(navigator.clipboard){ navigator.clipboard.writeText(texto); alert('Comentário registrado! A mensagem foi copiada — envie para a agência.'); }
+  }
+  openPost(id); // reabre o modal com o comentário na conversa
+}
+
+/* Aprovação pelo cliente: registra localmente + abre WhatsApp para confirmar à agência */
+function clientApprove(id, ok){
+  const p = client().posts.find(x=>x.id===id);
+  const msg = ($('#fbTxt')?$('#fbTxt').value:'').trim();
+  if(!ok && !msg) return alert('Descreva qual ajuste você gostaria, para orientarmos a alteração.');
+  p.status = ok ? 'aprovado' : 'ajuste';
+  p.feedback = msg;
+  saveDB();
+  const dataBR = new Date(p.date+'T12:00').toLocaleDateString('pt-BR');
+  const texto = `*${client().name}* — conteúdo "${p.title}" (${dataBR}):\n${ok?'✅ APROVADO':'✏️ AJUSTE SOLICITADO'}${msg?'\n💬 '+msg:''}`;
+  const w = (DB.settings.whats||'').replace(/\D/g,'');
+  if(w){ window.open('https://wa.me/'+w+'?text='+encodeURIComponent(texto),'_blank'); }
+  else if(navigator.clipboard){ navigator.clipboard.writeText(texto); alert('Resposta registrada! A mensagem de confirmação foi copiada — cole e envie para a agência.'); }
+  closeModal(); renderCal();
+}
+
 /* Modal de post (visualizar / editar) */
 function openPost(id, dateDefault){
   const p = id ? client().posts.find(x=>x.id===id) : null;
-  if(!isAdmin() && p){ // cliente: somente leitura
+  if(!isAdmin() && p){ // cliente: visualização + aprovação
     modal(`<h3>${esc(p.title)}</h3>
       <p class="sub" style="margin-bottom:14px">${new Date(p.date+'T12:00').toLocaleDateString('pt-BR',{weekday:'long',day:'2-digit',month:'long'})}</p>
       <div class="row" style="margin-bottom:16px">
@@ -635,13 +748,28 @@ function openPost(id, dateDefault){
         <span class="badge" style="background:${STATUS[p.status].color}22;color:${STATUS[p.status].color}">${STATUS[p.status].label}</span>
         <span class="badge" style="background:#EFEAFB;color:#6E6588">${esc(p.platform)}</span>
       </div>
+      ${p.media?`<div class="field"><label>Prévia do conteúdo</label><img src="${p.media}" style="max-width:100%;border-radius:12px;border:1px solid var(--line);box-shadow:var(--shadow)"></div>`:''}
+      ${p.mediaLink?`<div class="field"><a href="${esc(p.mediaLink)}" target="_blank" rel="noopener" class="btn ghost" style="display:inline-block;text-decoration:none">🔗 Ver prévia / arquivo</a></div>`:''}
       ${p.objetivo?`<div class="field"><label>🎯 Objetivo</label><p style="font-size:13.5px;line-height:1.65;color:#4B4368;font-weight:600">${esc(p.objetivo)}</p></div>`:''}
       ${p.explicacao?`<div class="field"><label>💬 Entenda esse conteúdo</label>
-        <p style="font-size:13.5px;line-height:1.7;color:#4B4368;background:linear-gradient(135deg,#F5F0FF,#FBF7FF);border:1px solid #EBDFFE;border-radius:10px;padding:13px">${esc(p.explicacao)}</p></div>`:''}
-      ${p.caption?`<div class="field"><label>Legenda / descrição</label><p style="font-size:13.5px;line-height:1.65;color:#4B4368">${esc(p.caption)}</p></div>`:''}
-      <button class="btn ghost" onclick="closeModal()" style="width:100%">Fechar</button>`);
+        <p style="font-size:13.5px;line-height:1.7;color:#4B4368;background:linear-gradient(135deg,#F5F0FF,#FBF7FF);border:1px solid #EBDFFE;border-radius:10px;padding:13px">${nl(p.explicacao)}</p></div>`:''}
+      ${p.caption?`<div class="field"><label>Legenda / descrição</label><p style="font-size:13.5px;line-height:1.65;color:#4B4368">${nl(p.caption)}</p></div>`:''}
+      ${p.feedback?`<div class="field"><label>Sua última resposta de aprovação</label><p style="font-size:13px;color:#6E6588;line-height:1.6">"${nl(p.feedback)}"</p></div>`:''}
+      <div style="border-top:1px solid var(--line);margin:6px 0 16px"></div>
+      ${cmtThreadHTML(p)}
+      ${p.status==='aprovacao'?`
+        <div style="border-top:1px solid var(--line);margin:6px 0 16px"></div>
+        <div class="field"><label>Comentário (opcional ao aprovar, obrigatório para ajuste)</label>
+          <textarea id="fbTxt" placeholder="Ex.: Trocar a foto de capa / ajustar o texto do 2º slide..."></textarea></div>
+        <div class="row">
+          <button class="btn violet" style="flex:1" onclick="clientApprove('${p.id}',true)">✅ Aprovar conteúdo</button>
+          <button class="btn ghost" style="flex:1" onclick="clientApprove('${p.id}',false)">✏️ Pedir ajuste</button>
+        </div>
+        <p class="sub" style="margin-top:12px;font-size:11.5px;line-height:1.5">Ao responder, uma mensagem pronta será aberta no WhatsApp para confirmar sua resposta à agência.</p>`
+      :`<button class="btn ghost" onclick="closeModal()" style="width:100%">Fechar</button>`}`);
     return;
   }
+  tempMedia = (p && p.media) ? {data:p.media, name:p.mediaName||''} : null;
   modal(`<h3>${p?'Editar conteúdo':'Novo conteúdo'}</h3>
     <div class="field"><label>Cliente</label>
       <select id="pClient">${Object.values(DB.clients).map(c=>
@@ -661,25 +789,59 @@ function openPost(id, dateDefault){
     <div class="field"><label>💬 Explicação para o cliente</label>
       <textarea id="pExp" placeholder="Explique a ideia, a referência e o porquê desse conteúdo — o cliente verá este texto ao clicar no post.">${p?esc(p.explicacao||''):''}</textarea></div>
     <div class="field"><label>Legenda / observações</label><textarea id="pCap" placeholder="Legenda, CTA, hashtags…">${p?esc(p.caption):''}</textarea></div>
+    <div class="field"><label>📎 Prévia para aprovação</label>
+      <div id="mediaPrev" style="margin-bottom:8px">${p&&p.media?`<img src="${p.media}" style="max-width:100%;border-radius:10px;border:1px solid var(--line)">`:''}</div>
+      <div class="row">
+        <label class="btn ghost sm" style="cursor:pointer">Anexar imagem
+          <input type="file" accept="image/*" style="display:none" onchange="handleMedia(this)"></label>
+        ${p&&p.media?`<button class="btn danger sm" onclick="tempMedia=null;document.getElementById('mediaPrev').innerHTML=''">Remover imagem</button>`:''}
+      </div>
+      <input id="pLink" value="${p?esc(p.mediaLink||''):''}" placeholder="…ou cole um link (Drive, Dropbox) — ideal para vídeos" style="margin-top:10px">
+      <p class="sub" style="margin-top:6px;font-size:11.5px">Com status <b>Em aprovação</b>, o cliente verá a prévia com botões de Aprovar / Pedir ajuste.</p></div>
+    ${p&&p.feedback?`<div class="insight" style="margin-bottom:16px">✔️ <b>Resposta de aprovação do cliente:</b> "${nl(p.feedback)}"</div>`:''}
+    ${p?cmtThreadHTML(p):''}
     <div class="row" style="justify-content:flex-end">
       ${p?`<button class="btn danger" onclick="delPost('${p.id}')">Excluir</button>`:''}
       <button class="btn ghost" onclick="closeModal()">Cancelar</button>
       <button class="btn violet" onclick="savePost('${p?p.id:''}')">Salvar</button>
     </div>`);
 }
+let tempMedia = null;
+function handleMedia(input){
+  const f = input.files[0]; if(!f) return;
+  if(!f.type.startsWith('image/')) return alert('Anexe uma imagem (JPG/PNG). Para vídeos, use o campo de link.');
+  const img = new Image();
+  img.onload = () => {
+    // Redimensiona para no máx. 1280px e comprime, para não pesar na publicação
+    const max = 1280, sc = Math.min(1, max/Math.max(img.width, img.height));
+    const cv = document.createElement('canvas');
+    cv.width = Math.round(img.width*sc); cv.height = Math.round(img.height*sc);
+    cv.getContext('2d').drawImage(img, 0, 0, cv.width, cv.height);
+    const url = cv.toDataURL('image/jpeg', .8);
+    if(url.length > 900000) return alert('Imagem muito pesada mesmo após compressão — use um link do Drive.');
+    tempMedia = {data:url, name:f.name};
+    document.getElementById('mediaPrev').innerHTML = `<img src="${url}" style="max-width:100%;border-radius:10px;border:1px solid var(--line)">`;
+    URL.revokeObjectURL(img.src);
+  };
+  img.src = URL.createObjectURL(f);
+}
 function savePost(id){
   const targetId = $('#pClient') ? $('#pClient').value : session.clientId;
   const data={date:$('#pDate').value,title:$('#pTitle').value.trim(),type:$('#pType').value,
     status:$('#pStatus').value,platform:$('#pPlat').value,
     objetivo:$('#pObj').value.trim(),explicacao:$('#pExp').value.trim(),
-    caption:$('#pCap').value.trim()};
+    caption:$('#pCap').value.trim(),
+    media: tempMedia ? tempMedia.data : '', mediaName: tempMedia ? tempMedia.name : '',
+    mediaLink: $('#pLink').value.trim()};
   if(!data.date||!data.title) return alert('Preencha data e título.');
   if(id){
     // localiza o cliente dono do post; se o cliente foi trocado, move o conteúdo
     const owner = Object.values(DB.clients).find(c=>c.posts.some(p=>p.id===id));
     if(owner && owner.id!==targetId){
+      const oldPost = owner.posts.find(p=>p.id===id);
+      const fb = oldPost.feedback||'', cmts = oldPost.comments||[];
       owner.posts = owner.posts.filter(p=>p.id!==id);
-      DB.clients[targetId].posts.push({id,...data});
+      DB.clients[targetId].posts.push({id, feedback:fb, comments:cmts, ...data});
     } else if(owner){
       Object.assign(owner.posts.find(p=>p.id===id),data);
     }
@@ -713,18 +875,75 @@ function renderAn(){
     </div>
     <div class="an-grid">
       ${items.map((i,idx)=>`
-        <div class="card an-card hoverable rise" style="animation-delay:${idx*0.05}s">
+        <div class="card an-card hoverable rise" style="animation-delay:${idx*0.05}s;cursor:pointer" onclick="openAnDetail('${i.id}')">
           <div class="top"><h3>${esc(i.area)}</h3><span class="badge ${i.prio}">${i.prio==='alta'?'Prioridade alta':i.prio==='media'?'Prioridade média':'Manter'}</span></div>
           <div class="row" style="margin-top:12px"><span class="score">${i.score}/10</span>
             <div class="progress" style="flex:1;margin-top:0"><i style="width:${i.score*10}%"></i></div></div>
-          <p class="txt">${esc(i.txt)}</p>
-          ${isAdmin()?`<div class="row mt"><button class="btn ghost sm" onclick="openAnItem('${i.id}')">Editar</button>
-            <button class="btn danger sm" onclick="delAn('${i.id}')">Excluir</button></div>`:''}
+          <p class="txt">${nl(i.txt.length>140 ? i.txt.slice(0,140)+'…' : i.txt)}</p>
+          ${(i.fotos&&i.fotos.length)?`<div class="row" style="margin-top:12px">${i.fotos.slice(0,4).map(f=>`<img src="${f}" style="width:52px;height:52px;object-fit:cover;border-radius:8px;border:1px solid var(--line)">`).join('')}</div>`:''}
+          <div class="row mt">
+            <button class="btn violet sm" onclick="event.stopPropagation();openAnDetail('${i.id}')">Ver detalhes</button>
+            ${isAdmin()?`<button class="btn ghost sm" onclick="event.stopPropagation();openAnItem('${i.id}')">Editar</button>
+            <button class="btn danger sm" onclick="event.stopPropagation();delAn('${i.id}')">Excluir</button>`:''}
+          </div>
         </div>`).join('') || `<div class="card empty">Nenhum ponto de análise cadastrado ainda.</div>`}
     </div>`;
 }
+function openAnDetail(id){
+  const i = client().analysis.find(x=>x.id===id);
+  const prioLbl = i.prio==='alta'?'Prioridade alta':i.prio==='media'?'Prioridade média':'Manter';
+  modal(`<h3>${esc(i.area)}</h3>
+    <div class="row" style="margin-bottom:16px">
+      <span class="badge ${i.prio}">${prioLbl}</span>
+      <span class="score" style="font-family:var(--font-display);font-weight:800;font-size:18px;color:var(--violet)">Nota ${i.score}/10</span>
+    </div>
+    <div class="progress" style="margin:0 0 18px"><i style="width:${i.score*10}%"></i></div>
+    <div class="field"><label>Diagnóstico e recomendação</label>
+      <p style="font-size:14px;line-height:1.8;color:#4B4368">${nl(i.txt)}</p></div>
+    ${(i.fotos&&i.fotos.length)?`<div class="field"><label>Imagens de referência</label>
+      <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:10px">
+        ${i.fotos.map(f=>`<img src="${f}" style="width:100%;border-radius:10px;border:1px solid var(--line);cursor:zoom-in" onclick="zoomFoto(this.src)">`).join('')}
+      </div></div>`:''}
+    <div class="row" style="justify-content:flex-end;margin-top:6px">
+      ${isAdmin()?`<button class="btn ghost" onclick="openAnItem('${i.id}')">Editar</button>`:''}
+      <button class="btn violet" onclick="closeModal()">Fechar</button>
+    </div>`);
+}
+function zoomFoto(src){
+  modal(`<img src="${src}" style="width:100%;border-radius:12px"><button class="btn ghost mt" style="width:100%" onclick="closeModal()">Voltar</button>`);
+}
+let anFotos = [];
+function handleAnFoto(input){
+  const files = [...input.files];
+  files.forEach(f=>{
+    if(!f.type.startsWith('image/')) return;
+    if(anFotos.length >= 4) return alert('Máximo de 4 imagens por item de análise.');
+    const img = new Image();
+    img.onload = () => {
+      const max = 1280, sc = Math.min(1, max/Math.max(img.width, img.height));
+      const cv = document.createElement('canvas');
+      cv.width = Math.round(img.width*sc); cv.height = Math.round(img.height*sc);
+      cv.getContext('2d').drawImage(img, 0, 0, cv.width, cv.height);
+      const url = cv.toDataURL('image/jpeg', .8);
+      if(url.length > 900000) return alert('Uma das imagens ficou pesada demais — tente um print menor.');
+      anFotos.push(url); renderAnFotosPrev();
+      URL.revokeObjectURL(img.src);
+    };
+    img.src = URL.createObjectURL(f);
+  });
+  input.value = '';
+}
+function renderAnFotosPrev(){
+  const box = document.getElementById('anFotosPrev'); if(!box) return;
+  box.innerHTML = anFotos.map((f,idx)=>`
+    <div style="position:relative">
+      <img src="${f}" style="width:100%;height:90px;object-fit:cover;border-radius:10px;border:1px solid var(--line)">
+      <button onclick="anFotos.splice(${idx},1);renderAnFotosPrev()" style="position:absolute;top:-7px;right:-7px;width:22px;height:22px;border-radius:50%;border:0;background:#EF4444;color:#fff;font-size:13px;line-height:1;box-shadow:0 2px 8px rgba(0,0,0,.3)">×</button>
+    </div>`).join('');
+}
 function openAnItem(id){
   const i=id?client().analysis.find(x=>x.id===id):null;
+  anFotos = (i && i.fotos) ? [...i.fotos] : [];
   modal(`<h3>${i?'Editar análise':'Novo ponto de análise'}</h3>
     <div class="field"><label>Área avaliada</label><input id="aArea" value="${i?esc(i.area):''}" placeholder="Ex.: Frequência de postagem"></div>
     <div class="form-2">
@@ -734,14 +953,21 @@ function openAnItem(id){
         <option value="media" ${i&&i.prio==='media'?'selected':''}>Média</option>
         <option value="baixa" ${i&&i.prio==='baixa'?'selected':''}>Baixa / manter</option></select></div>
     </div>
-    <div class="field"><label>Diagnóstico e recomendação</label><textarea id="aTxt">${i?esc(i.txt):''}</textarea></div>
+    <div class="field"><label>Diagnóstico e recomendação</label>
+      <textarea id="aTxt" style="min-height:130px" placeholder="Escreva com parágrafos e quebras de linha — o cliente verá exatamente como você digitar.">${i?esc(i.txt):''}</textarea></div>
+    <div class="field"><label>📷 Imagens (prints, referências, capas de destaques…)</label>
+      <div id="anFotosPrev" style="display:grid;grid-template-columns:repeat(auto-fill,minmax(110px,1fr));gap:10px;margin-bottom:10px"></div>
+      <label class="btn ghost sm" style="cursor:pointer;display:inline-block">Adicionar fotos
+        <input type="file" accept="image/*" multiple style="display:none" onchange="handleAnFoto(this)"></label>
+      <p class="sub" style="margin-top:6px;font-size:11.5px">Até 4 imagens por item — elas aparecem no card e na visualização detalhada.</p></div>
     <div class="row" style="justify-content:flex-end">
       <button class="btn ghost" onclick="closeModal()">Cancelar</button>
       <button class="btn violet" onclick="saveAn('${i?i.id:''}')">Salvar</button></div>`);
+  renderAnFotosPrev();
 }
 function saveAn(id){
   const data={area:$('#aArea').value.trim(),score:Math.min(10,Math.max(0,+$('#aScore').value||0)),
-    prio:$('#aPrio').value,txt:$('#aTxt').value.trim()};
+    prio:$('#aPrio').value,txt:$('#aTxt').value.trim(),fotos:[...anFotos]};
   if(!data.area) return alert('Informe a área avaliada.');
   if(id) Object.assign(client().analysis.find(x=>x.id===id),data);
   else client().analysis.push({id:uid(),...data});
@@ -757,7 +983,7 @@ function renderRep(){
   const c=client(), ks=filteredKeys().slice().reverse(), lr=latestReport();
   $('#view').innerHTML=`
     ${lr&&lr.data.notas?`<div class="card rise" style="margin-bottom:20px;border-left:4px solid #A855F7">
-      <h3>Resumo do mês — ${labelMK(lr.key)}</h3><p class="sub" style="margin-top:8px;line-height:1.65;font-size:13.5px">${esc(lr.data.notas)}</p></div>`:''}
+      <h3>Resumo do mês — ${labelMK(lr.key)}</h3><p class="sub" style="margin-top:8px;line-height:1.65;font-size:13.5px">${nl(lr.data.notas)}</p></div>`:''}
     <div class="card rise" style="margin-bottom:20px">
       <div class="row" style="justify-content:space-between">
         <div><h3>Histórico mensal</h3><div class="sub">Base de dados que alimenta o dashboard</div></div>
@@ -892,15 +1118,22 @@ function renderCfg(){
         <div class="field mt"><label>Nova senha</label><input type="password" id="newPass" placeholder="Mínimo 6 caracteres"></div>
         <button class="btn violet" onclick="changePass()">Atualizar senha</button>
         <p class="sub mt" id="passMsg"></p>
+        <div style="border-top:1px solid var(--line);margin:18px 0"></div>
+        <h3>WhatsApp da agência</h3>
+        <div class="sub">As aprovações e pedidos de ajuste dos clientes chegam neste número</div>
+        <div class="field mt"><label>Número com DDI e DDD (só dígitos)</label>
+          <input id="whatsNum" value="${esc(DB.settings.whats||'')}" placeholder="Ex.: 5544999998888"></div>
+        <button class="btn violet" onclick="DB.settings.whats=document.getElementById('whatsNum').value.replace(/\D/g,'');saveDB();this.textContent='✓ Salvo';setTimeout(()=>this.textContent='Salvar número',1500)">Salvar número</button>
       </div>
       <div class="card rise" style="animation-delay:.07s">
-        <h3>Publicação e dados</h3>
+        <h3>Dados na nuvem</h3>
         <p class="sub mt" style="line-height:1.65">
-          Suas edições ficam salvas <b>neste navegador</b> automaticamente. Para que os <b>clientes vejam as atualizações</b> no link público, exporte a versão publicável e substitua o arquivo <b>index.html</b> no seu repositório do GitHub (leva menos de 1 minuto).
-          <br><br>⚠️ Este sistema é uma página estática: a senha protege a interface, mas não é segurança de nível bancário. Não guarde dados sensíveis aqui.
+          ☁️ Este sistema está <b>conectado ao banco de dados</b> (Supabase). Tudo o que você edita é salvo na nuvem e aparece para os clientes <b>automaticamente</b> — sem exportar nem subir arquivo no GitHub. Comentários e aprovações dos clientes também chegam direto ao seu painel (a tela busca novidades a cada 30 segundos).
+          <br><br>O botão de exportar continua disponível apenas como <b>backup</b> dos seus dados.
+          <br><br>⚠️ A senha protege a interface, mas não é segurança de nível bancário. Não guarde dados sensíveis aqui.
         </p>
         <div class="row mt">
-          <button class="btn violet" onclick="exportPublish()">⬇ Exportar versão para publicar</button>
+          <button class="btn violet" onclick="exportPublish()">⬇ Baixar backup (index.html)</button>
           <button class="btn danger" onclick="resetAll()">Restaurar demonstração</button>
         </div>
       </div>
@@ -913,7 +1146,7 @@ function changePass(){
   $('#passMsg').textContent='✓ Senha atualizada com sucesso.'; $('#newPass').value='';
 }
 async function resetAll(){
-  if(!confirm('Isso apaga TODOS os clientes e restaura a demo. Continuar?')) return;
+  if(!confirm('ATENÇÃO: isso apaga TODOS os clientes NA NUVEM (para você e para os clientes) e restaura a demonstração. Tem certeza?')) return;
   DB=seed(); await saveDB(); refreshSidebar(); go('dash');
 }
 
