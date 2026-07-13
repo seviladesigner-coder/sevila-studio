@@ -569,7 +569,18 @@ function renderDash(){
   const mp=monthPosts(mk), done=mp.filter(p=>p.status==='postado').length;
   const pct = mp.length? Math.round(done/mp.length*100) : 0;
 
+  const pend = c.posts.filter(p=>p.pendente);
   $('#view').innerHTML = `
+    ${pend.length?`<div class="card rise" style="border-left:4px solid #F59E0B;margin-bottom:20px">
+      <h3>📌 Material pendente</h3>
+      <div class="sub">${isAdmin()?'Itens aguardando retorno do cliente':'Precisamos de você nestes conteúdos para conseguir finalizar:'}</div>
+      ${pend.map(p=>`<div class="row" style="justify-content:space-between;margin-top:12px;padding-top:12px;border-top:1px solid var(--line)">
+        <div style="flex:1;min-width:200px"><b style="font-size:13.5px">${esc(p.title)}</b>
+          <span class="sub"> · ${new Date(p.date+'T12:00').toLocaleDateString('pt-BR')}</span>
+          ${p.pendenteTxt?`<div class="sub" style="margin-top:4px;line-height:1.55">${nl(p.pendenteTxt)}</div>`:''}</div>
+        <button class="btn violet sm" onclick="openPost('${p.id}')">${isAdmin()?'Abrir':'Responder'}</button>
+      </div>`).join('')}
+    </div>`:''}
     <div class="grid kpis">
       <div class="card kpi hoverable rise">
         <div class="lbl">Calendário de ${MESES[HOJE.getMonth()].toLowerCase()}</div>
@@ -681,7 +692,7 @@ function renderCal(){
     const dayPosts=posts.filter(p=>p.date===dk);
     cells+=`<div class="cal-cell ${isToday?'today':''}"><span class="d">${d}</span>
       ${dayPosts.map(p=>`<div class="pill" style="background:${TIPOS[p.type].color}" onclick="openPost('${p.id}')" title="${esc(p.title)}">
-        <i class="st" style="background:${STATUS[p.status].color}"></i><span>${esc(p.title.length>24?p.title.slice(0,23)+'…':p.title)}${(p.comments&&p.comments.length)?' 💬':''}</span></div>`).join('')}
+        <i class="st" style="background:${STATUS[p.status].color}"></i><span>${p.pendente?'📌 ':''}${esc(p.title.length>22?p.title.slice(0,21)+'…':p.title)}${(p.comments&&p.comments.length)?' 💬':''}</span></div>`).join('')}
       ${isAdmin()?`<div class="pill" style="background:#EFEAFB;color:#7C3AED;justify-content:center" onclick="openPost(null,'${dk}')">+ novo</div>`:''}
     </div>`;
   }
@@ -700,6 +711,7 @@ function renderCal(){
       <div class="cal-wrap"><div class="cal-grid">${cells}</div></div>
       <div class="legend">
         ${Object.values(TIPOS).map(t=>`<span><i style="background:${t.color}"></i>${t.label}</span>`).join('')}
+        <span>📌 Material pendente</span>
         <span style="margin-left:auto">Bolinha no conteúdo = status:</span>
         ${Object.values(STATUS).map(s=>`<span><i style="background:${s.color};border-radius:50%"></i>${s.label}</span>`).join('')}
       </div>
@@ -754,7 +766,7 @@ function clientApprove(id, ok){
   const texto = `*${client().name}* — conteúdo "${p.title}" (${dataBR}):\n${ok?'✅ APROVADO':'✏️ AJUSTE SOLICITADO'}${msg?'\n💬 '+msg:''}`;
   const w = (DB.settings.whats||'').replace(/\D/g,'');
   if(w){ window.open('https://wa.me/'+w+'?text='+encodeURIComponent(texto),'_blank'); }
-  closeModal(); renderCal();
+  closeModal(); go(currentView);
 }
 
 /* Modal de post (visualizar / editar) */
@@ -768,6 +780,10 @@ function openPost(id, dateDefault){
         <span class="badge" style="background:${STATUS[p.status].color}22;color:${STATUS[p.status].color}">${STATUS[p.status].label}</span>
         <span class="badge" style="background:#EFEAFB;color:#6E6588">${esc(p.platform)}</span>
       </div>
+      ${p.pendente?`<div style="background:linear-gradient(135deg,#FFF7E6,#FFFDF5);border:1px solid #FDE68A;border-radius:12px;padding:14px 16px;margin-bottom:16px">
+        <div style="font-weight:700;font-size:13.5px;color:#92400E">📌 Precisamos de você para finalizar este conteúdo!</div>
+        ${p.pendenteTxt?`<p style="font-size:13px;color:#78350F;line-height:1.6;margin-top:6px">${nl(p.pendenteTxt)}</p>`:''}
+        <p class="sub" style="font-size:11.5px;margin-top:8px">Responda nos comentários abaixo ou envie o material pelo WhatsApp.</p></div>`:''}
       ${p.media?`<div class="field"><label>Prévia do conteúdo</label><img src="${p.media}" style="max-width:100%;border-radius:12px;border:1px solid var(--line);box-shadow:var(--shadow)"></div>`:''}
       ${p.mediaLink?`<div class="field"><a href="${esc(p.mediaLink)}" target="_blank" rel="noopener" class="btn ghost" style="display:inline-block;text-decoration:none">🔗 Ver prévia / arquivo</a></div>`:''}
       ${p.objetivo?`<div class="field"><label>🎯 Objetivo</label><p style="font-size:13.5px;line-height:1.65;color:#4B4368;font-weight:600">${esc(p.objetivo)}</p></div>`:''}
@@ -806,6 +822,11 @@ function openPost(id, dateDefault){
     </div>
     <div class="field"><label>🎯 Objetivo do conteúdo</label>
       <input id="pObj" value="${p?esc(p.objetivo||''):''}" placeholder="Ex.: Alcance — atrair novas contas para o perfil"></div>
+    <div class="field"><label>📌 Material pendente do cliente</label>
+      <label style="display:flex;align-items:center;gap:9px;font-size:13.5px;font-weight:600;color:#4B4368;cursor:pointer;margin-bottom:8px">
+        <input type="checkbox" id="pPend" ${p&&p.pendente?'checked':''} style="width:17px;height:17px;accent-color:#F59E0B">
+        Ativar aviso de pendência (aparece em destaque para o cliente)</label>
+      <input id="pPendTxt" value="${p?esc(p.pendenteTxt||''):''}" placeholder="O que você precisa? Ex.: fotos do produto novo, resposta sobre o valor da promoção…"></div>
     <div class="field"><label>💬 Explicação para o cliente</label>
       <textarea id="pExp" placeholder="Explique a ideia, a referência e o porquê desse conteúdo — o cliente verá este texto ao clicar no post.">${p?esc(p.explicacao||''):''}</textarea></div>
     <div class="field"><label>Legenda / observações</label><textarea id="pCap" placeholder="Legenda, CTA, hashtags…">${p?esc(p.caption):''}</textarea></div>
@@ -852,7 +873,8 @@ function savePost(id){
     objetivo:$('#pObj').value.trim(),explicacao:$('#pExp').value.trim(),
     caption:$('#pCap').value.trim(),
     media: tempMedia ? tempMedia.data : '', mediaName: tempMedia ? tempMedia.name : '',
-    mediaLink: $('#pLink').value.trim()};
+    mediaLink: $('#pLink').value.trim(),
+    pendente: $('#pPend').checked, pendenteTxt: $('#pPendTxt').value.trim()};
   if(!data.date||!data.title) return alert('Preencha data e título.');
   if(id){
     // localiza o cliente dono do post; se o cliente foi trocado, move o conteúdo
@@ -868,12 +890,12 @@ function savePost(id){
   } else {
     DB.clients[targetId].posts.push({id:uid(),...data});
   }
-  saveDB(); closeModal(); renderCal();
+  saveDB(); closeModal(); go(currentView);
 }
 function delPost(id){
   if(!confirm('Excluir este conteúdo?')) return;
   const c=client(); c.posts=c.posts.filter(p=>p.id!==id);
-  saveDB(); closeModal(); renderCal();
+  saveDB(); closeModal(); go(currentView);
 }
 
 /* ============================================================
